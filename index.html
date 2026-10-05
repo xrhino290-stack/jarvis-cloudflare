@@ -39,7 +39,10 @@ button:disabled{opacity:.35}
 
 <div id="panel">
   <label>WORKER URL<input type="text" id="api" placeholder="https://jarvis.xxxx.workers.dev" autocapitalize="off" autocomplete="off"></label>
-  <label>VOICE<select id="vo"></select></label>
+  <label>VOICE ENGINE<select id="en"><option value="gemini">Gemini movie voice (male)</option><option value="phone">Phone voice</option></select></label>
+  <label>GEMINI VOICE<select id="gv"><option value="Charon">Charon (deep, calm)</option><option value="Orus">Orus (firm)</option><option value="Fenrir">Fenrir (strong)</option><option value="Puck">Puck (lively)</option><option value="Algenib">Algenib (rough)</option></select></label>
+  <label>JARVIS FX<select id="fx"><option value="1">On (metallic echo)</option><option value="0">Off</option></select></label>
+  <label>PHONE VOICE<select id="vo"></select></label>
   <label>SPEED <span id="spv"></span><input type="range" id="sp" min="0.6" max="1.6" step="0.05"></label>
   <label>PITCH <span id="piv"></span><input type="range" id="pi" min="0.5" max="1.8" step="0.05"></label>
   <label>MIC LANGUAGE<select id="la"><option value="en-IN">English / Hinglish (en-IN)</option><option value="hi-IN">Hindi (hi-IN)</option><option value="en-US">English (en-US)</option></select></label>
@@ -75,7 +78,7 @@ function proj(p,ca,sa,ct,stl,cx,cy){
 
 // ---- Settings (saved in browser) ----
 const $=id=>document.getElementById(id);
-let cfg={api:'',voice:'',rate:1,pitch:1,lang:'en-IN'};
+let cfg={api:'',engine:'gemini',gv:'Charon',fx:'1',voice:'',rate:1,pitch:1,lang:'en-IN'};
 try{Object.assign(cfg,JSON.parse(localStorage.getItem('jarvis_cfg')||'{}'))}catch(e){}
 function save(){try{localStorage.setItem('jarvis_cfg',JSON.stringify(cfg))}catch(e){}}
 
@@ -88,10 +91,13 @@ function loadVoices(){
   sel.value=cfg.voice;
 }
 if('speechSynthesis' in window){loadVoices();speechSynthesis.onvoiceschanged=loadVoices}
-$('api').value=cfg.api;$('sp').value=cfg.rate;$('pi').value=cfg.pitch;$('la').value=cfg.lang;
+$('api').value=cfg.api;$('en').value=cfg.engine;$('gv').value=cfg.gv;$('fx').value=cfg.fx;$('sp').value=cfg.rate;$('pi').value=cfg.pitch;$('la').value=cfg.lang;
 function showVals(){$('spv').textContent=cfg.rate+'x';$('piv').textContent=cfg.pitch}
 showVals();
 $('api').oninput=e=>{cfg.api=e.target.value.trim();save()};
+$('en').onchange=e=>{cfg.engine=e.target.value;save()};
+$('gv').onchange=e=>{cfg.gv=e.target.value;save()};
+$('fx').onchange=e=>{cfg.fx=e.target.value;save()};
 $('vo').onchange=e=>{cfg.voice=e.target.value;save()};
 $('sp').oninput=e=>{cfg.rate=+e.target.value;showVals();save()};
 $('pi').oninput=e=>{cfg.pitch=+e.target.value;showVals();save()};
@@ -125,6 +131,7 @@ function setJarvis(on){
 }
 function stopAll(){
   try{speechSynthesis.cancel()}catch(e){}
+  spkId++;if(curSrc){const s=curSrc;curSrc=null;try{s.stop()}catch(e){}}
   if(rec){try{rec.abort()}catch(e){}rec=null}
   state='idle';
 }
@@ -166,15 +173,49 @@ async function ask(text){
   }
 }
 
+let ac=null,curSrc=null,spkId=0;
+function audioCtx(){
+  if(!ac){const A=window.AudioContext||window.webkitAudioContext;if(A)ac=new A()}
+  if(ac&&ac.state==='suspended')ac.resume();
+  return ac;
+}
+function afterSpeak(){state='idle';if(jarvis&&sysOn)setTimeout(()=>{if(state==='idle')listen()},400)}
+
 function speak(txt,force){
   if(!sysOn&&!force)return;
-  speechSynthesis.cancel();
+  try{speechSynthesis.cancel()}catch(e){}
+  spkId++;if(curSrc){const s=curSrc;curSrc=null;try{s.stop()}catch(e){}}
+  if(cfg.engine==='gemini'&&cfg.api&&audioCtx())geminiSpeak(txt);else phoneSpeak(txt);
+}
+
+async function geminiSpeak(txt){
+  const id=++spkId,A=audioCtx();state='speak';
+  try{
+    const res=await fetch(cfg.api,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tts:true,text:txt,voice:cfg.gv})});
+    const d=await res.json();
+    if(id!==spkId)return;
+    if(!d.audio)throw new Error(d.error||'no audio');
+    const bin=atob(d.audio),n=bin.length>>1,buf=A.createBuffer(1,n,d.rate||24000),ch=buf.getChannelData(0);
+    for(let i=0;i<n;i++){let v=bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8);if(v>=32768)v-=65536;ch[i]=v/32768}
+    const src=A.createBufferSource();src.buffer=buf;src.playbackRate.value=cfg.rate*cfg.pitch;
+    const g=A.createGain();src.connect(g);g.connect(A.destination);
+    if(cfg.fx==='1'){const dl=A.createDelay(0.1);dl.delayTime.value=0.028;const fg=A.createGain();fg.gain.value=0.3;g.connect(dl);dl.connect(fg);fg.connect(A.destination)}
+    curSrc=src;
+    src.onended=()=>{if(id===spkId&&curSrc===src){curSrc=null;afterSpeak()}};
+    src.start();
+  }catch(e){
+    if(id!==spkId)return;
+    tx.textContent+=' (Gemini voice: '+String(e.message).slice(0,90)+')';
+    phoneSpeak(txt);
+  }
+}
+
+function phoneSpeak(txt){
   const u=new SpeechSynthesisUtterance(txt);
   const v=voices.find(x=>x.name===cfg.voice);
   if(v){u.voice=v;u.lang=v.lang}else u.lang='hi-IN';
   u.rate=cfg.rate;u.pitch=cfg.pitch;
-  const done=()=>{state='idle';if(jarvis&&sysOn)setTimeout(()=>{if(state==='idle')listen()},400)};
-  u.onend=done;u.onerror=done;
+  u.onend=afterSpeak;u.onerror=afterSpeak;
   state='speak';speechSynthesis.speak(u);
 }
 
